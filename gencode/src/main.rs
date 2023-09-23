@@ -110,6 +110,7 @@ fn main() -> ExitCode {
         .unwrap();
 
     let message = "my message".as_bytes();
+    println!("message: {:?}", message);
     let _x = run_frost(n, thres, index, addrs, port, message);
 
     ExitCode::SUCCESS

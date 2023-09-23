@@ -369,11 +369,11 @@ pub extern "C" fn callme(slice: *const libc::c_uchar, len: libc::size_t) -> *con
     let data = unsafe { slice::from_raw_parts(slice, len as usize) };
     println!(">>>>hello from rust {:?}", data);
 
-    let n = 4;
-    let thres = 3;
-    let index = 1;
-    let port = 8878;
-    let addrs = "192.168.0.146";
+    let n = 5;
+    let thres = 2;
+    let index = 0;
+    let port = 8877;
+    let addrs = "192.168.0.138,192.168.0.146,192.168.0.153,192.168.0.154,192.168.0.190";
 
     let frost_data = run_frost(n, thres, index, addrs.to_string(), port, data).unwrap();
     let pk = frost_data.pk;
@@ -383,6 +383,6 @@ pub extern "C" fn callme(slice: *const libc::c_uchar, len: libc::size_t) -> *con
     bytes[32..].copy_from_slice(&sig);
 
     let x = bytes.as_ptr();
-    println!(">>>> rust bytes {:?}", x);
+    println!(">>>> rust bytes {:?}", bytes);
     x
 }
