@@ -5,6 +5,8 @@ extern crate libc;
 use frost::keys::{
     PublicKeyPackage, SecretShare, SigningShare, VerifiableSecretSharingCommitment, VerifyingShare,
 };
+use frost::round1::SigningCommitments;
+use frost::round2::SignatureShare;
 use frost::{Identifier, VerifyingKey};
 use frost_ed25519 as frost;
 use rand::thread_rng;
@@ -196,6 +198,13 @@ pub struct MyCommitments {
     pub hiding: [u8; 32],
     pub binding: [u8; 32],
     pub id: [u8; 32],
+    pub verifying_share: [u8; 32], //needed for validating signature_share
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct MySignatureShare {
+    pub identifier: [u8; 32],
+    pub secret_share: [u8; 32],
 }
 
 pub fn run_frost(
@@ -206,85 +215,44 @@ pub fn run_frost(
     port: usize,
     message: &[u8],
 ) -> Result<FrostData, frost_ed25519::Error> {
-    // let mut device = init_devices(n, thres, index, addrs, port);
-    // let index = device.index + 1;
-    // let n = device.n;
-    // let thres = device.thres;
-    // println!("n {}, index {}, thres {}", n, index, thres);
+    let mut device = init_devices(n, thres, index, addrs, port);
+    let index = device.index + 1;
+    let participant_index = index as u16;
+    let n = device.n;
+    let thres = device.thres;
+    println!("n {}, index {}, thres {}", n, index, thres);
 
     let mut rng = thread_rng();
-    let max_signers = n as u16;
-    let min_signers = thres as u16;
-    //
     let mut signer_pubkeys: HashMap<Identifier, VerifyingShare> = HashMap::new();
-    let mut shares: HashMap<Identifier, SecretShare> = HashMap::new();
 
     let path = env::current_dir().unwrap();
     println!("The current directory is {}", path.display());
 
-    for participant_index in 1..(max_signers as u16 + 1) {
-        let file = File::open(format!("./key-{}", participant_index)).unwrap();
-        let reader = BufReader::new(file);
-        let mykey: FrostSecret = serde_json::from_reader(reader).unwrap();
+    let file = File::open(format!("./key-{}", participant_index)).unwrap();
+    let reader = BufReader::new(file);
+    let mykey: FrostSecret = serde_json::from_reader(reader).unwrap();
 
-        let id = Identifier::deserialize(&mykey.identifier).unwrap();
-        let vshare = VerifyingShare::deserialize(mykey.verifying_share).unwrap();
-        let commitments = VerifiableSecretSharingCommitment::deserialize(mykey.commitment).unwrap();
-        let sk = SigningShare::deserialize(mykey.secret).unwrap();
-        signer_pubkeys.insert(id, vshare);
+    let id = Identifier::deserialize(&mykey.identifier).unwrap();
+    let vshare = VerifyingShare::deserialize(mykey.verifying_share).unwrap();
+    let commitment = VerifiableSecretSharingCommitment::deserialize(mykey.commitment).unwrap();
+    let sk = SigningShare::deserialize(mykey.secret).unwrap();
+    let secret_share = SecretShare::new(id, sk, commitment);
 
-        let secret_shares = SecretShare::new(id, sk, commitments);
-        shares.insert(id, secret_shares);
-    }
+    signer_pubkeys.insert(id, vshare);
 
     let file = File::open("./key.pub").unwrap();
     let reader = BufReader::new(file);
     let pk_encoded = serde_json::from_reader(reader).unwrap();
     let pk = VerifyingKey::deserialize(pk_encoded).unwrap();
-    let pubkey_package = PublicKeyPackage::new(signer_pubkeys, pk);
-
-    // let (shares, pubkey_package) = frost::keys::generate_with_dealer(
-    //     max_signers,
-    //     min_signers,
-    //     frost::keys::IdentifierList::Default,
-    //     &mut rng,
-    // )?;
-    //
-    // let file = File::create("key.pub").unwrap();
-    // let mut writer = BufWriter::new(file);
-    // serde_json::to_writer(&mut writer, &pubkey_package.group_public().serialize()).unwrap();
-    // writer.flush().unwrap();
-    // let serialized = serde_json::to_string(&pubkey_package.group_public().serialize()).unwrap();
-    // println!(">>>serialized {}", serialized);
 
     // Verifies the secret shares from the dealer and store them in a HashMap.
     // In practice, the KeyPackages must be sent to its respective participants
     // through a confidential and authenticated channel.
-    let mut key_packages: HashMap<_, _> = HashMap::new();
 
-    let mut i = 0;
-    for (identifier, secret_share) in shares {
-        i += 1;
-        // let file = File::create(format!("{}-{}", "key", i)).unwrap();
-        // let mut writer = BufWriter::new(file);
-        // let id = identifier.serialize();
-        // let sec = secret_share.secret().serialize();
-        // let vshare = pubkey_package.signer_pubkeys()[&identifier].serialize();
-        // let cmm = secret_share.commitment().serialize();
-        // let frost_secret = FrostSecret {
-        //     identifier: id,
-        //     secret: sec,
-        //     verifying_share: vshare,
-        //     commitment: cmm,
-        // };
-        // serde_json::to_writer(&mut writer, &frost_secret).unwrap();
-        // writer.flush().unwrap();
+    let key_package = frost::keys::KeyPackage::try_from(secret_share)?;
+    let participant_identifier: Identifier =
+        participant_index.try_into().expect("should be nonzero");
 
-        let key_package = frost::keys::KeyPackage::try_from(secret_share)?;
-        key_packages.insert(identifier, key_package);
-    }
-
-    let mut nonces_map = HashMap::new();
     let mut commitments_map = BTreeMap::new();
 
     ////////////////////////////////////////////////////////////////////////////
@@ -292,43 +260,41 @@ pub fn run_frost(
     ////////////////////////////////////////////////////////////////////////////
 
     // In practice, each iteration of this loop will be executed by its respective participant.
-    for participant_index in 1..(min_signers as u16 + 1) {
-        let participant_identifier = participant_index.try_into().expect("should be nonzero");
-        let key_package = &key_packages[&participant_identifier];
-        // Generate one (1) nonce and one SigningCommitments instance for each
-        // participant, up to _threshold_.
-        let (nonces, commitments) = frost::round1::commit(
-            key_packages[&participant_identifier].secret_share(),
-            &mut rng,
-        );
+    // Generate one (1) nonce and one SigningCommitments instance for each
+    // participant, up to _threshold_.
+    let (nonces, commitments) = frost::round1::commit(key_package.secret_share(), &mut rng);
+    commitments_map.insert(participant_identifier, commitments);
 
-        let sb = commitments.binding().serialize();
-        let sh = commitments.hiding().serialize();
-        let si = participant_identifier.serialize();
-        let mc = MyCommitments {
-            hiding: sh,
-            binding: sb,
-            id: si,
-        };
-        let mc_encoded = serde_json::to_vec(&mc).unwrap();
+    //**********************communicate the commitments and verifying_shares**********************************
+    let sb = commitments.binding().serialize();
+    let sh = commitments.hiding().serialize();
+    let si = participant_identifier.serialize();
+    let mc = MyCommitments {
+        hiding: sh,
+        binding: sb,
+        id: si,
+        verifying_share: mykey.verifying_share,
+    };
+    let mc_encoded = serde_json::to_vec(&mc).unwrap();
 
-        // let other_commitments = device.broadcast_and_listen(&mc_encoded[..]);
-        // for p in &other_commitments {
-        //     let mc_decoded: MyCommitments = serde_json::from_slice(&p).unwrap();
-        //     let b = frost_ed25519::round1::NonceCommitment::deserialize(mc_decoded.binding)?;
-        //     let h = frost_ed25519::round1::NonceCommitment::deserialize(mc_decoded.hiding)?;
-        //     let i = Identifier::deserialize(&mc_decoded.id)?;
-        //     let other_c = SigningCommitments::new(h, b);
-        //     commitments_map.insert(i, other_c);
-        // }
-
-        // In practice, the nonces must be kept by the participant to use in the
-        // next round, while the commitment must be sent to the coordinator
-        // (or to every other participant if there is no coordinator) using
-        // an authenticated channel.
-        nonces_map.insert(participant_identifier, nonces);
-        commitments_map.insert(participant_identifier, commitments);
+    let other_commitments = device.broadcast_and_listen(&mc_encoded[..]);
+    for p in &other_commitments {
+        let mc_decoded: MyCommitments = serde_json::from_slice(&p).unwrap();
+        let b = frost_ed25519::round1::NonceCommitment::deserialize(mc_decoded.binding)?;
+        let h = frost_ed25519::round1::NonceCommitment::deserialize(mc_decoded.hiding)?;
+        let i = Identifier::deserialize(&mc_decoded.id)?;
+        let other_c = SigningCommitments::new(h, b);
+        commitments_map.insert(i, other_c);
+        let vs = VerifyingShare::deserialize(mc_decoded.verifying_share).unwrap();
+        signer_pubkeys.insert(i, vs);
     }
+    //**********************communicate the commitments**********************************
+
+    // In practice, the nonces must be kept by the participant to use in the
+    // next round, while the commitment must be sent to the coordinator
+    // (or to every other participant if there is no coordinator) using
+    // an authenticated channel.
+    let pubkey_package = PublicKeyPackage::new(signer_pubkeys, pk);
 
     // This is what the signature aggregator / coordinator needs to do:
     // - decide what message to sign
@@ -341,18 +307,28 @@ pub fn run_frost(
     ////////////////////////////////////////////////////////////////////////////
 
     // In practice, each iteration of this loop will be executed by its respective participant.
-    for participant_identifier in nonces_map.keys() {
-        let key_package = &key_packages[participant_identifier];
 
-        let nonces = &nonces_map[participant_identifier];
+    // Each participant generates their signature share.
+    let signature_share = frost::round2::sign(&signing_package, &nonces, &key_package)?;
+    signature_shares.insert(participant_identifier, signature_share);
 
-        // Each participant generates their signature share.
-        let signature_share = frost::round2::sign(&signing_package, nonces, key_package)?;
-
-        // In practice, the signature share must be sent to the Coordinator
-        // using an authenticated channel.
-        signature_shares.insert(*participant_identifier, signature_share);
+    // *********************communicate the signature_share*************************************
+    // In practice, the signature share must be sent to the Coordinator
+    // using an authenticated channel.
+    let serialized_secret_share = signature_share.serialize();
+    let mss = MySignatureShare {
+        identifier: si,
+        secret_share: serialized_secret_share,
+    };
+    let my_signature_share_encoded = serde_json::to_vec(&mss).unwrap();
+    let other_secret_shares = device.broadcast_and_listen(&my_signature_share_encoded);
+    for oss in &other_secret_shares {
+        let mss_decoded: MySignatureShare = serde_json::from_slice(&oss).unwrap();
+        let other_id = Identifier::deserialize(&mss_decoded.identifier)?;
+        let other_secret_share = SignatureShare::deserialize(mss_decoded.secret_share)?;
+        signature_shares.insert(other_id, other_secret_share);
     }
+    // *********************communicate the signature_share*************************************
 
     ////////////////////////////////////////////////////////////////////////////
     // Aggregation: collects the signing shares from all participants,
@@ -364,8 +340,7 @@ pub fn run_frost(
     let pk_bytes = pubkey_package.group_public().serialize();
     let _pub_key = VerifyingKey::deserialize(pk_bytes)?;
     let sig_bytes = group_signature.serialize();
-    // println!(">>>>>pbk {:?} {}", pk_bytes, pk_bytes.len());
-    // println!(">>>>>sig {:?} {}", sig_bytes, sig_bytes.len());
+    println!("sig_bytes {:?}", sig_bytes);
 
     // Check that the threshold signature can be verified by the group public
     // key (the verification key).
