@@ -5,26 +5,20 @@ extern crate libc;
 use frost::keys::{
     PublicKeyPackage, SecretShare, SigningShare, VerifiableSecretSharingCommitment, VerifyingShare,
 };
-use frost::round1::SigningCommitments;
-use frost::{Identifier, SigningKey, VerifyingKey};
+use frost::{Identifier, VerifyingKey};
 use frost_ed25519 as frost;
 use rand::thread_rng;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::ffi::{CStr, CString};
 
-use bincode::{config, Decode, Encode};
-use std::env;
-use std::error::Error;
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::thread;
 use std::thread::sleep;
 /// Benchmarking for 2 of n signing
 use std::time::Duration;
+use std::{env, slice};
 
 extern crate getopts;
-use self::getopts::{Matches, Options};
 
 use std::fs::File;
 
@@ -192,9 +186,9 @@ pub struct FrostData {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct FrostSecret {
     pub identifier: [u8; 32],
-    pub secret: [u8; 32],
-    pub verifying_share: [u8; 32],
-    pub commitment: Vec<[u8; 32]>,
+    pub verifying_share: [u8; 32], //needed for validating signature_share
+    pub secret: [u8; 32],          //part of secret_share
+    pub commitment: Vec<[u8; 32]>, //part of secret_share
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -221,36 +215,41 @@ pub fn run_frost(
     let mut rng = thread_rng();
     let max_signers = n as u16;
     let min_signers = thres as u16;
-
-    // let mut signer_pubkeys: HashMap<Identifier, VerifyingShare> = HashMap::new();
-    // let mut shares: HashMap<Identifier, SecretShare> = HashMap::new();
-    // for participant_index in 1..(max_signers as u16 + 1) {
-    //     let file = File::open(format!("key-{}", participant_index)).unwrap();
-    //     let reader = BufReader::new(file);
-    //     let secrets: FrostSecret = serde_json::from_reader(reader).unwrap();
-    //     let id = Identifier::deserialize(&secrets.identifier).unwrap();
-    //     let vshare = VerifyingShare::deserialize(secrets.verifying_share).unwrap();
-    //     let commitments =
-    //         VerifiableSecretSharingCommitment::deserialize(secrets.commitment).unwrap();
-    //     let sec = SigningShare::deserialize(secrets.secret).unwrap();
-    //     signer_pubkeys.insert(id, vshare);
     //
-    //     let secret_shares = SecretShare::new(id, sec, commitments);
-    //     shares.insert(id, secret_shares);
-    // }
-    // let file = File::open("key.pub").unwrap();
-    // let reader = BufReader::new(file);
-    // let pk_encoded = serde_json::from_reader(reader).unwrap();
-    // let pk = VerifyingKey::deserialize(pk_encoded).unwrap();
-    // let pubkey_package = PublicKeyPackage::new(signer_pubkeys, pk);
+    let mut signer_pubkeys: HashMap<Identifier, VerifyingShare> = HashMap::new();
+    let mut shares: HashMap<Identifier, SecretShare> = HashMap::new();
 
-    let (shares, pubkey_package) = frost::keys::generate_with_dealer(
-        max_signers,
-        min_signers,
-        frost::keys::IdentifierList::Default,
-        &mut rng,
-    )?;
+    let path = env::current_dir().unwrap();
+    println!("The current directory is {}", path.display());
 
+    for participant_index in 1..(max_signers as u16 + 1) {
+        let file = File::open(format!("./key-{}", participant_index)).unwrap();
+        let reader = BufReader::new(file);
+        let mykey: FrostSecret = serde_json::from_reader(reader).unwrap();
+
+        let id = Identifier::deserialize(&mykey.identifier).unwrap();
+        let vshare = VerifyingShare::deserialize(mykey.verifying_share).unwrap();
+        let commitments = VerifiableSecretSharingCommitment::deserialize(mykey.commitment).unwrap();
+        let sk = SigningShare::deserialize(mykey.secret).unwrap();
+        signer_pubkeys.insert(id, vshare);
+
+        let secret_shares = SecretShare::new(id, sk, commitments);
+        shares.insert(id, secret_shares);
+    }
+
+    let file = File::open("./key.pub").unwrap();
+    let reader = BufReader::new(file);
+    let pk_encoded = serde_json::from_reader(reader).unwrap();
+    let pk = VerifyingKey::deserialize(pk_encoded).unwrap();
+    let pubkey_package = PublicKeyPackage::new(signer_pubkeys, pk);
+
+    // let (shares, pubkey_package) = frost::keys::generate_with_dealer(
+    //     max_signers,
+    //     min_signers,
+    //     frost::keys::IdentifierList::Default,
+    //     &mut rng,
+    // )?;
+    //
     // let file = File::create("key.pub").unwrap();
     // let mut writer = BufWriter::new(file);
     // serde_json::to_writer(&mut writer, &pubkey_package.group_public().serialize()).unwrap();
@@ -365,8 +364,8 @@ pub fn run_frost(
     let pk_bytes = pubkey_package.group_public().serialize();
     let _pub_key = VerifyingKey::deserialize(pk_bytes)?;
     let sig_bytes = group_signature.serialize();
-    println!(">>>>>pbk {:?} {}", pk_bytes, pk_bytes.len());
-    println!(">>>>>sig {:?} {}", sig_bytes, sig_bytes.len());
+    // println!(">>>>>pbk {:?} {}", pk_bytes, pk_bytes.len());
+    // println!(">>>>>sig {:?} {}", sig_bytes, sig_bytes.len());
 
     // Check that the threshold signature can be verified by the group public
     // key (the verification key).
@@ -384,14 +383,16 @@ pub fn run_frost(
         pk: pk_bytes,
     };
 
+    println!(">>>pk {:?}", pk_bytes);
+    println!(">>>sig {:?}", sig_bytes);
+
     Ok(x)
 }
 
 #[no_mangle]
-pub extern "C" fn rustdemo(name: *const libc::c_char) -> *const libc::c_char {
-    let cstr_name = unsafe { CStr::from_ptr(name) };
-    let msg = cstr_name.to_bytes();
-    println!(">>>>hello from rust! {:?}", cstr_name);
+pub extern "C" fn callme(slice: *const libc::c_uchar, len: libc::size_t) -> *const libc::c_uchar {
+    let data = unsafe { slice::from_raw_parts(slice, len as usize) };
+    println!(">>>>hello from rust {:?}", data);
 
     let n = 4;
     let thres = 3;
@@ -399,12 +400,14 @@ pub extern "C" fn rustdemo(name: *const libc::c_char) -> *const libc::c_char {
     let port = 8878;
     let addrs = "192.168.0.146";
 
-    let frost_data = run_frost(n, thres, index, addrs.to_string(), port, msg).unwrap();
+    let frost_data = run_frost(n, thres, index, addrs.to_string(), port, data).unwrap();
     let pk = frost_data.pk;
     let sig = frost_data.sig;
     let mut bytes: [u8; 96] = [0; 96];
     bytes[..32].copy_from_slice(&pk);
     bytes[32..].copy_from_slice(&sig);
 
-    CString::new(bytes).unwrap().into_raw()
+    let x = bytes.as_ptr();
+    println!(">>>> rust bytes {:?}", x);
+    x
 }
