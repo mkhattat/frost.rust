@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::mem::ManuallyDrop;
 
 extern crate libc;
 
@@ -213,14 +214,31 @@ pub fn run_frost(
     index: usize,
     addrs: String,
     port: usize,
-    message: &[u8],
+    message_og: &[u8],
 ) -> Result<FrostData, frost_ed25519::Error> {
     let mut device = init_devices(n, thres, index, addrs, port);
     let index = device.index + 1;
     let participant_index = index as u16;
     let n = device.n;
     let thres = device.thres;
-    println!("n {}, index {}, thres {}", n, index, thres);
+
+    let message: &[u8];
+    let mut myvec: Vec<u8> = Vec::new();
+    if index == 1 {
+        message = message_og;
+        myvec.push(0);
+        let msg_encoded = serde_json::to_vec(&message_og).unwrap();
+        device.broadcast(&msg_encoded);
+    } else {
+        let msg_decoded = device.listen(0);
+        myvec = serde_json::from_slice(&msg_decoded).unwrap();
+        message = &myvec[..];
+    }
+
+    println!(
+        "n {}, index {}, thres {} msg {:?}",
+        n, index, thres, message
+    );
 
     let mut rng = thread_rng();
     let mut signer_pubkeys: HashMap<Identifier, VerifyingShare> = HashMap::new();
@@ -340,7 +358,6 @@ pub fn run_frost(
     let pk_bytes = pubkey_package.group_public().serialize();
     let _pub_key = VerifyingKey::deserialize(pk_bytes)?;
     let sig_bytes = group_signature.serialize();
-    println!("sig_bytes {:?}", sig_bytes);
 
     // Check that the threshold signature can be verified by the group public
     // key (the verification key).
@@ -358,21 +375,17 @@ pub fn run_frost(
         pk: pk_bytes,
     };
 
-    println!(">>>pk {:?}", pk_bytes);
-    println!(">>>sig {:?}", sig_bytes);
-
     Ok(x)
 }
-
 #[no_mangle]
 pub extern "C" fn callme(slice: *const libc::c_uchar, len: libc::size_t) -> *const libc::c_uchar {
     let data = unsafe { slice::from_raw_parts(slice, len as usize) };
     println!(">>>>hello from rust {:?}", data);
 
     let n = 5;
-    let thres = 2;
+    let thres = 3;
     let index = 0;
-    let port = 8877;
+    let port = 8878;
     let addrs = "192.168.0.138,192.168.0.146,192.168.0.153,192.168.0.154,192.168.0.190";
 
     let frost_data = run_frost(n, thres, index, addrs.to_string(), port, data).unwrap();
@@ -382,7 +395,14 @@ pub extern "C" fn callme(slice: *const libc::c_uchar, len: libc::size_t) -> *con
     bytes[..32].copy_from_slice(&pk);
     bytes[32..].copy_from_slice(&sig);
 
-    let x = bytes.as_ptr();
-    println!(">>>> rust bytes {:?}", bytes);
+    println!(">>>pk {:?}", pk);
+    println!(">>>sig {:?}", sig);
+
+    let v = ManuallyDrop::new(bytes);
+
+    let x = v.as_ptr();
+    std::mem::forget(x);
+    std::mem::forget(bytes);
+    println!(">>>x {:?}", x);
     x
 }

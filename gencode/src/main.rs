@@ -76,7 +76,7 @@ pub fn process_options() -> Option<Matches> {
     return Option::Some(matches);
 }
 
-fn main() -> ExitCode {
+fn run() -> ExitCode {
     let matches = process_options();
     if let None = matches {
         ::std::process::exit(1);
@@ -114,4 +114,10 @@ fn main() -> ExitCode {
     let _x = run_frost(n, thres, index, addrs, port, message);
 
     ExitCode::SUCCESS
+}
+
+fn main() -> ExitCode {
+    loop {
+        run();
+    }
 }
