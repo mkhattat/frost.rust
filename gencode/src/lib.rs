@@ -16,10 +16,10 @@ use std::collections::BTreeMap;
 
 use std::io::{BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::slice;
 use std::thread::sleep;
 /// Benchmarking for 2 of n signing
 use std::time::Duration;
-use std::{env, slice};
 
 extern crate getopts;
 
@@ -235,16 +235,8 @@ pub fn run_frost(
         message = &myvec[..];
     }
 
-    println!(
-        "n {}, index {}, thres {} msg {:?}",
-        n, index, thres, message
-    );
-
     let mut rng = thread_rng();
     let mut signer_pubkeys: HashMap<Identifier, VerifyingShare> = HashMap::new();
-
-    let path = env::current_dir().unwrap();
-    println!("The current directory is {}", path.display());
 
     let file = File::open(format!("./key-{}", participant_index)).unwrap();
     let reader = BufReader::new(file);
@@ -368,8 +360,6 @@ pub fn run_frost(
         .is_ok();
     assert!(is_signature_valid);
 
-    println!("DONE.");
-
     let x = FrostData {
         sig: sig_bytes,
         pk: pk_bytes,
@@ -380,13 +370,12 @@ pub fn run_frost(
 #[no_mangle]
 pub extern "C" fn callme(slice: *const libc::c_uchar, len: libc::size_t) -> *const libc::c_uchar {
     let data = unsafe { slice::from_raw_parts(slice, len as usize) };
-    println!(">>>>hello from rust {:?}", data);
 
-    let n = 5;
-    let thres = 3;
+    let n = 4;
+    let thres = 2;
     let index = 0;
     let port = 8878;
-    let addrs = "192.168.0.138,192.168.0.146,192.168.0.153,192.168.0.154,192.168.0.190";
+    let addrs = "192.168.0.146,192.168.0.153,192.168.0.154,192.168.0.190";
 
     let frost_data = run_frost(n, thres, index, addrs.to_string(), port, data).unwrap();
     let pk = frost_data.pk;
@@ -395,10 +384,10 @@ pub extern "C" fn callme(slice: *const libc::c_uchar, len: libc::size_t) -> *con
     bytes[..32].copy_from_slice(&pk);
     bytes[32..].copy_from_slice(&sig);
 
+    let v = ManuallyDrop::new(bytes);
+
     println!(">>>pk {:?}", pk);
     println!(">>>sig {:?}", sig);
-
-    let v = ManuallyDrop::new(bytes);
 
     let x = v.as_ptr();
     std::mem::forget(x);
